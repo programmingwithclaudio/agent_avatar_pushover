@@ -19,9 +19,10 @@ logger = logging.getLogger(__name__)
 
 
 class Config:
-    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-    PUSHOVER_TOKEN = os.getenv("PUSHOVER_TOKEN")
-    PUSHOVER_USER = os.getenv("PUSHOVER_USER")
+    # CRÍTICO: Limpia espacios y saltos de línea
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+    PUSHOVER_TOKEN = os.getenv("PUSHOVER_TOKEN", "").strip()
+    PUSHOVER_USER = os.getenv("PUSHOVER_USER", "").strip()
     MODEL = "gpt-4o-mini"
     
     LINKEDIN_PDF = "me/linkedin.pdf"
@@ -31,6 +32,59 @@ class Config:
     
     PORT = int(os.getenv("PORT", 8000))
     HOST = os.getenv("HOST", "0.0.0.0")
+    
+    @classmethod
+    def validate(cls):
+        """Valida que las variables de entorno estén correctas"""
+        logger.info("=" * 60)
+        logger.info("🔍 VALIDACIÓN DE VARIABLES DE ENTORNO")
+        logger.info("=" * 60)
+        
+        # Validar OPENAI_API_KEY
+        if not cls.OPENAI_API_KEY:
+            logger.error("❌ OPENAI_API_KEY no está configurada")
+            raise ValueError("OPENAI_API_KEY is required")
+        
+        logger.info(f"✅ API Key encontrada (length: {len(cls.OPENAI_API_KEY)})")
+        logger.info(f"   Preview: {cls.OPENAI_API_KEY[:15]}...{cls.OPENAI_API_KEY[-10:]}")
+        
+        # Verificar caracteres problemáticos
+        has_newline = '\n' in cls.OPENAI_API_KEY
+        has_return = '\r' in cls.OPENAI_API_KEY
+        has_tab = '\t' in cls.OPENAI_API_KEY
+        
+        if has_newline:
+            logger.error("❌ API Key contiene saltos de línea (\\n)")
+            logger.error(f"   Contenido sospechoso: {repr(cls.OPENAI_API_KEY)}")
+            raise ValueError("OPENAI_API_KEY contains newline characters")
+        
+        if has_return:
+            logger.error("❌ API Key contiene retornos de carro (\\r)")
+            raise ValueError("OPENAI_API_KEY contains carriage return characters")
+        
+        if has_tab:
+            logger.warning("⚠️  API Key contiene tabulaciones (\\t)")
+        
+        # Validar formato básico
+        if not cls.OPENAI_API_KEY.startswith("sk-"):
+            logger.error("❌ API Key no tiene el formato esperado (debe empezar con 'sk-')")
+            raise ValueError("OPENAI_API_KEY has invalid format")
+        
+        # Validar Pushover (opcional)
+        if cls.PUSHOVER_TOKEN:
+            logger.info(f"✅ Pushover Token configurado (length: {len(cls.PUSHOVER_TOKEN)})")
+            if '\n' in cls.PUSHOVER_TOKEN or '\r' in cls.PUSHOVER_TOKEN:
+                logger.error("❌ PUSHOVER_TOKEN contiene caracteres de nueva línea")
+                raise ValueError("PUSHOVER_TOKEN contains newline characters")
+        else:
+            logger.info("⚠️  Pushover Token no configurado (notificaciones deshabilitadas)")
+        
+        if cls.PUSHOVER_USER:
+            logger.info(f"✅ Pushover User configurado (length: {len(cls.PUSHOVER_USER)})")
+        
+        logger.info("=" * 60)
+        logger.info("✅ TODAS LAS VALIDACIONES PASARON")
+        logger.info("=" * 60)
 
 
 class NotificationService:
@@ -493,6 +547,14 @@ def create_gradio_interface(chat_manager: ChatManager, profile: ProfileLoader):
 
 
 def create_app():
+    # Validar variables de entorno al inicio
+    try:
+        Config.validate()
+    except ValueError as e:
+        logger.error(f"❌ Error de configuración: {e}")
+        logger.error("🔧 Revisa las variables de entorno en Railway")
+        raise
+    
     profile = ProfileLoader()
     chat_manager = ChatManager(profile)
     
@@ -569,8 +631,8 @@ def create_app():
 
 
 def main():
-    logger.info("Starting Portfolio Chat Server")
-    logger.info(f"Host: {Config.HOST}:{Config.PORT}")
+    logger.info("🚀 Starting Portfolio Chat Server")
+    logger.info(f"📡 Host: {Config.HOST}:{Config.PORT}")
     
     app = create_app()
     
