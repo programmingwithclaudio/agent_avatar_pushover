@@ -6,12 +6,17 @@ import requests
 from pypdf import PdfReader
 import gradio as gr
 import pandas as pd
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
-from threading import Thread
+import logging
 
 load_dotenv(override=True)
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 
 class Config:
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -24,13 +29,15 @@ class Config:
     PROJECTS_CSV = "datasets/resumen/repos_con_tags_dinamicos.csv"
     METADATA_JSON = "datasets/resumen/metadata_dinamica.json"
     
-    GRADIO_PORT = 7860
-    FASTAPI_PORT = 8000
+    PORT = int(os.getenv("PORT", 8000))
+    HOST = os.getenv("HOST", "0.0.0.0")
 
 
 class NotificationService:
     @staticmethod
     def send(message):
+        if not Config.PUSHOVER_TOKEN or not Config.PUSHOVER_USER:
+            return
         try:
             requests.post(
                 "https://api.pushover.net/1/messages.json",
@@ -38,10 +45,11 @@ class NotificationService:
                     "token": Config.PUSHOVER_TOKEN,
                     "user": Config.PUSHOVER_USER,
                     "message": message,
-                }
+                },
+                timeout=5
             )
         except Exception as e:
-            print(f"Error enviando notificación: {e}")
+            logger.error(f"Notification error: {e}")
 
 
 class ProfileLoader:
@@ -53,14 +61,9 @@ class ProfileLoader:
     def _load_linkedin(self):
         try:
             reader = PdfReader(Config.LINKEDIN_PDF)
-            text = ""
-            for page in reader.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text
-            return text
+            return "".join(page.extract_text() or "" for page in reader.pages)
         except FileNotFoundError:
-            print(f"⚠️ No se encontró {Config.LINKEDIN_PDF}")
+            logger.warning(f"LinkedIn PDF not found: {Config.LINKEDIN_PDF}")
             return "Perfil de LinkedIn no disponible"
     
     def _load_summary(self):
@@ -68,7 +71,7 @@ class ProfileLoader:
             with open(Config.SUMMARY_TXT, "r", encoding="utf-8") as f:
                 return f.read()
         except FileNotFoundError:
-            print(f"⚠️ No se encontró {Config.SUMMARY_TXT}")
+            logger.warning(f"Summary not found: {Config.SUMMARY_TXT}")
             return "Resumen profesional no disponible"
 
 
@@ -81,7 +84,7 @@ class ProjectRepository:
         try:
             return pd.read_csv(Config.PROJECTS_CSV, sep=",")
         except FileNotFoundError:
-            print(f"⚠️ No se encontró {Config.PROJECTS_CSV}")
+            logger.warning(f"Projects CSV not found: {Config.PROJECTS_CSV}")
             return pd.DataFrame()
     
     def _load_metadata(self):
@@ -89,7 +92,7 @@ class ProjectRepository:
             with open(Config.METADATA_JSON, "r", encoding="utf-8") as f:
                 return json.load(f)
         except FileNotFoundError:
-            print(f"⚠️ No se encontró {Config.METADATA_JSON}")
+            logger.warning(f"Metadata not found: {Config.METADATA_JSON}")
             return {}
     
     def search(self, dominio=None, tecnologia=None, tipo_proyecto=None, incluye_ml=False, limit=5):
@@ -197,8 +200,7 @@ class ProjectRepository:
                 "porcentaje": f"{(stats.get('proyectos_con_ml_ia', 0) / total * 100):.1f}%"
             }
         
-        else:
-            return {"error": f"Categoría '{categoria}' no reconocida"}
+        return {"error": f"Categoría '{categoria}' no reconocida"}
 
 
 def record_user_details(email, name="Nombre no indicado", notes="no proporcionadas"):
@@ -277,8 +279,8 @@ TOOLS_SCHEMA = [
                 "properties": {
                     "categoria": {
                         "type": "string",
-                        "description": "Categoría: general, backend, frontend, ml, ia, devops, fullstack, dominios",
-                        "enum": ["general", "backend", "frontend", "ml", "ia", "devops", "fullstack", "dominios"]
+                        "description": "Categoría: general, backend, frontend, ml, ia",
+                        "enum": ["general", "backend", "frontend", "ml", "ia"]
                     }
                 },
                 "required": []
@@ -344,13 +346,8 @@ Mantente siempre en el personaje de {self.profile.name}."""
             tool_name = tool_call.function.name
             arguments = json.loads(tool_call.function.arguments)
             
-            print(f"🔧 Ejecutando: {tool_name} con {arguments}", flush=True)
-            
             tool_function = globals().get(tool_name)
-            if tool_function:
-                result = tool_function(**arguments)
-            else:
-                result = {"error": f"Herramienta '{tool_name}' no encontrada"}
+            result = tool_function(**arguments) if tool_function else {"error": f"Tool '{tool_name}' not found"}
             
             results.append({
                 "role": "tool",
@@ -361,226 +358,37 @@ Mantente siempre en el personaje de {self.profile.name}."""
         return results
 
 
-def create_fastapi_app(chat_manager: ChatManager):
-    app = FastAPI(title="Portfolio Chat API", version="1.0")
-    
-    @app.get("/")
-    async def root():
-        return {
-            "message": "Portfolio Chat API",
-            "endpoints": {
-                "chat": "/api/chat",
-                "projects": "/api/projects",
-                "expertise": "/api/expertise"
-            }
-        }
-    
-    @app.post("/api/chat")
-    async def chat_endpoint(request: dict):
-        try:
-            message = request.get("message", "")
-            history = request.get("history", [])
-            
-            response = chat_manager.chat(message, history)
-            
-            return JSONResponse({
-                "response": response,
-                "status": "success"
-            })
-        except Exception as e:
-            return JSONResponse({
-                "error": str(e),
-                "status": "error"
-            }, status_code=500)
-    
-    @app.get("/api/projects")
-    async def projects_endpoint(
-        dominio: str = None,
-        tecnologia: str = None,
-        tipo_proyecto: str = None,
-        incluye_ml: bool = False,
-        limit: int = 5
-    ):
-        try:
-            result = search_projects(dominio, tecnologia, tipo_proyecto, incluye_ml, limit)
-            return JSONResponse(result)
-        except Exception as e:
-            return JSONResponse({
-                "error": str(e),
-                "status": "error"
-            }, status_code=500)
-    
-    @app.get("/api/expertise")
-    async def expertise_endpoint(categoria: str = "general"):
-        try:
-            result = get_technical_expertise(categoria)
-            return JSONResponse(result)
-        except Exception as e:
-            return JSONResponse({
-                "error": str(e),
-                "status": "error"
-            }, status_code=500)
-    
-    return app
-
-
-def create_gradio_app(chat_manager: ChatManager, profile: ProfileLoader):
-    
+def create_gradio_interface(chat_manager: ChatManager, profile: ProfileLoader):
     custom_css = """
     .gradio-container {
         background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%) !important;
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-        min-height: 100vh;
-    }
-    
-    .contain {
-        max-width: 1600px;
-        margin: 0 auto;
-        padding: 20px;
     }
     
     #chat-container {
         height: 550px !important;
-        max-height: 65vh !important;
-        overflow-y: auto !important;
-        overflow-x: hidden !important;
         background: rgba(255, 255, 255, 0.02) !important;
         border-radius: 16px !important;
         border: 1px solid rgba(102, 126, 234, 0.2) !important;
-        padding: 16px !important;
-        margin: 0 !important;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3) !important;
     }
     
-    #chat-container .message-wrap {
-        background: rgba(255, 255, 255, 0.05) !important;
-        border: 1px solid rgba(255, 255, 255, 0.08) !important;
-        border-radius: 12px !important;
-        backdrop-filter: blur(10px) !important;
-        margin: 10px 0 !important;
-        padding: 14px 18px !important;
-        max-width: 85% !important;
-    }
-    
-    #chat-container .user,
-    #chat-container .message.user {
+    .user, .message.user {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
         color: #ffffff !important;
-        margin-left: auto !important;
-        margin-right: 0 !important;
-        border: none !important;
     }
     
-    #chat-container .user p,
-    #chat-container .user span,
-    #chat-container .user div,
-    #chat-container .message.user p,
-    #chat-container .message.user span,
-    #chat-container .message.user div {
-        color: #ffffff !important;
-    }
-    
-    #chat-container .bot,
-    #chat-container .message.bot {
+    .bot, .message.bot {
         background: rgba(255, 255, 255, 0.12) !important;
         border-left: 3px solid #667eea !important;
-        color: #ffffff !important;
-        margin-right: auto !important;
-        margin-left: 0 !important;
-    }
-    
-    #chat-container .bot p,
-    #chat-container .bot span,
-    #chat-container .bot div,
-    #chat-container .message.bot p,
-    #chat-container .message.bot span,
-    #chat-container .message.bot div {
         color: #ffffff !important;
     }
     
     .sidebar-questions {
         background: rgba(255, 255, 255, 0.03) !important;
         border-radius: 16px !important;
-        padding: 0 !important;
         border: 1px solid rgba(102, 126, 234, 0.2) !important;
         height: 600px !important;
-        max-height: 70vh !important;
         overflow-y: auto !important;
-        overflow-x: hidden !important;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3) !important;
-        display: block !important;
-    }
-    .category-title {
-        color: #667eea !important;
-        font-size: 12px !important;
-        font-weight: 700 !important;
-        margin: 16px 0 8px 0 !important;
-        text-transform: uppercase !important;
-        letter-spacing: 0.8px !important;
-        border-bottom: 1px solid rgba(102, 126, 234, 0.3) !important;
-        padding-bottom: 4px !important;
-        line-height: 1 !important;
-    }
-    .sidebar-questions .category-title,
-    .sidebar-questions .category-title * {
-        color: #667eea !important;
-    }
-    
-    .category-section {
-        margin-bottom: 16px !important;
-        padding: 0 12px !important;
-    }
-
-    .questions-container {
-        display: flex !important;
-        flex-direction: column !important;
-        gap: 6px !important;
-        margin-bottom: 8px !important;
-    } 
-    
-    .sidebar-questions .markdown,
-    .sidebar-questions .prose {
-        margin: 4px 0 !important;
-        padding: 0 !important;
-        /* Añadir para evitar que herede colores incorrectos */
-        color: inherit !important;
-    }
-    .category-title .markdown,
-    .category-title .prose {
-        color: #667eea !important;
-    }
-    .sidebar-questions .markdown p,
-    .sidebar-questions .prose p {
-        color: inherit !important;
-    }
-    #chat-container::-webkit-scrollbar,
-    .sidebar-questions::-webkit-scrollbar {
-        width: 10px;
-    }
-    
-    #chat-container::-webkit-scrollbar-track,
-    .sidebar-questions::-webkit-scrollbar-track {
-        background: rgba(255, 255, 255, 0.05);
-        border-radius: 10px;
-        margin: 8px;
-    }
-    
-    #chat-container::-webkit-scrollbar-thumb,
-    .sidebar-questions::-webkit-scrollbar-thumb {
-        background: linear-gradient(180deg, #667eea 0%, #764ba2 100%);
-        border-radius: 10px;
-        border: 2px solid rgba(255, 255, 255, 0.05);
-    }
-    
-    #chat-container::-webkit-scrollbar-thumb:hover,
-    .sidebar-questions::-webkit-scrollbar-thumb:hover {
-        background: linear-gradient(180deg, #7c8ef0 0%, #8a5bb0 100%);
-    }
-    
-    #chat-container,
-    .sidebar-questions {
-        scrollbar-width: thin;
-        scrollbar-color: #667eea rgba(255, 255, 255, 0.05);
     }
     
     .question-btn {
@@ -589,197 +397,21 @@ def create_gradio_app(chat_manager: ChatManager, profile: ProfileLoader):
         color: #ffffff !important;
         border-radius: 8px !important;
         padding: 10px 14px !important;
-        margin: 0 !important; /* Eliminamos márgenes verticales */
-        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
         font-size: 12px !important;
         text-align: left !important;
         width: 100% !important;
-        white-space: normal !important;
-        word-wrap: break-word !important;
-        line-height: 1.4 !important;
-        cursor: pointer !important;
-        flex-shrink: 0 !important;
+        transition: all 0.3s ease !important;
     }
     
     .question-btn:hover {
         background: linear-gradient(135deg, rgba(102, 126, 234, 0.3) 0%, rgba(118, 75, 162, 0.3) 100%) !important;
-        border-color: rgba(102, 126, 234, 0.6) !important;
-        transform: translateX(4px) scale(1.02) !important;
-        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3) !important;
-        color: #ffffff !important;
-    }
-    
-    .question-btn:active {
-        transform: translateX(6px) scale(0.98) !important;
-    }
-    
-    h1, h2, h3, h4 {
-        color: #e8e8e8 !important;
-        font-weight: 600 !important;
-        margin: 0 0 6px 0 !important;
-    }
-    
-    .header-section {
-        padding: 18px !important;
-        margin-bottom: 14px !important;
-        background: rgba(255, 255, 255, 0.02) !important;
-        border-radius: 16px !important;
-        border: 1px solid rgba(102, 126, 234, 0.2) !important;
+        transform: translateX(4px) !important;
     }
     
     .header-section h1 {
-        font-size: 26px !important;
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
-        background-clip: text;
-        margin-bottom: 4px !important;
-    }
-    
-    .header-section h3 {
-        font-size: 15px !important;
-        color: #158f56 !important;
-        font-weight: 400 !important;
-    }
-    
-    .section-title {
-        color: #667eea !important;
-        font-size: 10px !important;
-        font-weight: 700 !important;
-        margin: 12px 0 6px 0 !important;
-        text-transform: uppercase !important;
-        letter-spacing: 0.8px !important;
-        border-bottom: 1px solid rgba(102, 126, 234, 0.3) !important;
-        padding-bottom: 2px !important;
-        line-height: 1 !important;
-    }
-    
-    .section-title:first-of-type {
-        margin-top: 0 !important;
-    }
-    
-    .sidebar-title {
-        color: #e8e8e8 !important;
-        font-size: 17px !important;
-        margin: 12px 0 6px 0 !important;
-        text-align: center !important;
-    }
-    
-    .sidebar-subtitle {
-        font-size: 10px !important;
-        color: #888 !important;
-        text-align: center !important;
-        margin: 0 0 12px 0 !important;
-        font-style: italic !important;
-    }
-    
-    .input-container {
-        padding: 0 !important;
-        background: #1f2937;
-        border-radius: 0 !important;
-        margin-top: 12px !important;
-        border: none !important;
-        display: flex !important;
-        gap: 8px !important;
-        align-items: stretch !important;
-    }
-    
-    .input-container textarea {
-        background: rgba(255, 255, 255, 0.08) !important;
-        border: 1px solid rgba(102, 126, 234, 0.4) !important;
-        color: #ffffff !important;
-        border-radius: 12px !important;
-        padding: 14px 16px !important;
-        font-size: 14px !important;
-        resize: none !important;
-        min-height: 50px !important;
-        max-height: 100px !important;
-    }
-    
-    .input-container textarea::placeholder {
-        color: rgba(255, 255, 255, 0.5) !important;
-    }
-    
-    .input-container textarea:focus {
-        border-color: #667eea !important;
-        box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2) !important;
-        outline: none !important;
-        background: rgba(255, 255, 255, 0.12) !important;
-    }
-    
-    .input-container button {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
-        border: none !important;
-        color: white !important;
-        border-radius: 12px !important;
-        padding: 0 24px !important;
-        font-size: 20px !important;
-        transition: all 0.3s ease !important;
-        cursor: pointer !important;
-        min-width: 60px !important;
-        height: auto !important;
-        align-self: stretch !important;
-    }
-    
-    .input-container button:hover {
-        transform: scale(1.05) !important;
-        box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4) !important;
-    }
-    
-    .input-container button:active {
-        transform: scale(0.98) !important;
-    }
-    
-    @media (max-width: 768px) {
-        .contain {
-            padding: 12px;
-        }
-        
-        #chat-container {
-            height: 350px !important;
-            max-height: 50vh !important;
-        }
-        
-        .sidebar-questions {
-            height: 300px !important;
-            max-height: 45vh !important;
-        }
-        
-        .sidebar-questions > * {
-            padding: 0 10px !important;
-        }
-        
-        .question-btn {
-            font-size: 11px !important;
-            padding: 7px 10px !important;
-        }
-        
-        .section-title {
-            font-size: 9px !important;
-            margin: 10px 0 4px 0 !important;
-        }
-    }
-    
-    * {
-        -webkit-font-smoothing: antialiased;
-        -moz-osx-font-smoothing: grayscale;
-    }
-    
-    .bot p, .user p,
-    .message.bot p, .message.user p {
-        line-height: 1.6 !important;
-        margin: 0 !important;
-        color: inherit !important;
-    }
-    
-    #chat-container * {
-        color: inherit !important;
-    }
-    
-    button:focus-visible,
-    textarea:focus-visible {
-        outline: 3px solid #667eea !important;
-        outline-offset: 2px !important;
     }
     """
     
@@ -791,44 +423,29 @@ def create_gradio_app(chat_manager: ChatManager, profile: ProfileLoader):
         ],
         "💻 Backend": [
             "¿Qué proyectos has hecho con Python?",
-            "¿Tienes experiencia con FastAPI o Django?",
-            "¿Has trabajado con bases de datos?",
+            "¿Tienes experiencia con FastAPI?",
             "Muéstrame tu experiencia en APIs"
         ],
         "🎨 Frontend": [
             "¿Qué frameworks de frontend dominas?",
-            "¿Has trabajado con React o Vue?",
+            "¿Has trabajado con React?",
             "Muéstrame proyectos de UI"
         ],
         "🤖 ML & IA": [
             "¿Tienes experiencia en ML?",
             "¿Qué proyectos de IA has desarrollado?",
-            "¿Has trabajado con TensorFlow?",
             "Muéstrame modelos de ML"
-        ],
-        "🏗️ Arquitectura": [
-            "¿Experiencia con Docker y Kubernetes?",
-            "¿Has trabajado con microservicios?",
-            "¿Qué experiencia tienes en DevOps?",
-            "Proyectos con arquitectura escalable"
         ],
         "🚀 Destacados": [
             "¿Cuáles son tus proyectos más complejos?",
             "¿Has desarrollado apps Full Stack?",
-            "¿Proyectos de E-commerce?",
             "Proyectos con procesamiento de datos"
         ]
     }
     
     with gr.Blocks(css=custom_css, theme=gr.themes.Soft()) as demo:
         with gr.Column(elem_classes="header-section"):
-            gr.Markdown(
-                f"""
-                # 💬 Chat con {profile.name}
-                ### Desarrollador Web & Data/AI Solutions | Python · SQL/NoSQL
-                """,
-                elem_classes="header"
-            )
+            gr.Markdown(f"# 💬 Chat con {profile.name}\n### Desarrollador Web & Data/AI Solutions")
         
         with gr.Row(equal_height=True):
             with gr.Column(scale=65):
@@ -837,40 +454,27 @@ def create_gradio_app(chat_manager: ChatManager, profile: ProfileLoader):
                     type="messages",
                     show_label=False,
                     avatar_images=(None, "https://api.dicebear.com/7.x/bottts/svg?seed=assistant"),
-                    show_copy_button=True,
                     height=600
                 )
                 
-                with gr.Row(elem_classes="input-container"):
-                    with gr.Column(scale=9, min_width=0):
+                with gr.Row():
+                    with gr.Column(scale=9):
                         msg = gr.Textbox(
                             placeholder="💭 Escribe tu pregunta aquí...",
                             show_label=False,
-                            container=False,
-                            lines=2,
-                            max_lines=4
+                            lines=2
                         )
                     with gr.Column(scale=1, min_width=60):
-                        submit = gr.Button("📤", variant="primary", size="lg")
+                        submit = gr.Button("📤", variant="primary")
             
             with gr.Column(scale=35, elem_classes="sidebar-questions"):
-                gr.Markdown("### 📋 Preguntas Sugeridas", elem_classes="sidebar-title")
-                gr.Markdown("*💡 Haz clic en cualquier pregunta*", elem_classes="sidebar-subtitle")
+                gr.Markdown("### 📋 Preguntas Sugeridas")
                 
                 for categoria, preguntas in preguntas_clave.items():
-                    gr.Markdown(f"**{categoria}**", elem_classes="category-title")
+                    gr.Markdown(f"**{categoria}**")
                     for pregunta in preguntas:
-                        btn = gr.Button(
-                            f"→ {pregunta}",
-                            elem_classes="question-btn",
-                            size="sm"
-                        )
-                        btn.click(
-                            lambda p=pregunta: p,
-                            None,
-                            msg,
-                            queue=False
-                        )
+                        btn = gr.Button(f"→ {pregunta}", elem_classes="question-btn", size="sm")
+                        btn.click(lambda p=pregunta: p, None, msg, queue=False)
         
         def respond(message, chat_history):
             if not message.strip():
@@ -888,58 +492,95 @@ def create_gradio_app(chat_manager: ChatManager, profile: ProfileLoader):
     return demo
 
 
-def run_fastapi_server(app):
-    uvicorn.run(
-        app,
-        host="127.0.0.1",
-        port=Config.FASTAPI_PORT,
-        log_level="info"
+def create_app():
+    profile = ProfileLoader()
+    chat_manager = ChatManager(profile)
+    
+    app = FastAPI(
+        title="Portfolio Chat API",
+        description="Integrated FastAPI + Gradio portfolio chat",
+        version="2.0.0"
     )
+    
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    
+    @app.get("/")
+    async def root():
+        return RedirectResponse(url="/chat")
+    
+    @app.get("/health")
+    async def health():
+        return {"status": "healthy", "version": "2.0.0"}
+    
+    @app.post("/api/chat")
+    async def chat_endpoint(request: Request):
+        try:
+            body = await request.json()
+            message = body.get("message", "")
+            history = body.get("history", [])
+            
+            if not message.strip():
+                return JSONResponse({"error": "Empty message"}, status_code=400)
+            
+            response = chat_manager.chat(message, history)
+            return JSONResponse({"response": response, "status": "success"})
+        except Exception as e:
+            logger.error(f"Chat error: {e}")
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    @app.get("/api/projects")
+    async def projects_endpoint(
+        dominio: str = None,
+        tecnologia: str = None,
+        tipo_proyecto: str = None,
+        incluye_ml: bool = False,
+        limit: int = 5
+    ):
+        try:
+            result = search_projects(dominio, tecnologia, tipo_proyecto, incluye_ml, limit)
+            return JSONResponse(result)
+        except Exception as e:
+            logger.error(f"Projects error: {e}")
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    @app.get("/api/expertise")
+    async def expertise_endpoint(categoria: str = "general"):
+        try:
+            valid = ["general", "backend", "frontend", "ml", "ia"]
+            if categoria not in valid:
+                return JSONResponse({"error": f"Invalid category. Use: {valid}"}, status_code=400)
+            
+            result = get_technical_expertise(categoria)
+            return JSONResponse(result)
+        except Exception as e:
+            logger.error(f"Expertise error: {e}")
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    gradio_app = create_gradio_interface(chat_manager, profile)
+    app = gr.mount_gradio_app(app, gradio_app, path="/chat")
+    
+    return app
 
 
 def main():
-    print("=" * 60)
-    print("🚀 INICIANDO PORTFOLIO CHAT - DUAL MODE")
-    print("=" * 60)
+    logger.info("Starting Portfolio Chat Server")
+    logger.info(f"Host: {Config.HOST}:{Config.PORT}")
     
-    print("\n🔄 Cargando perfil profesional...")
-    profile = ProfileLoader()
+    app = create_app()
     
-    print("💬 Iniciando chat manager...")
-    chat_manager = ChatManager(profile)
-    
-    print("\n📡 Configurando servidores...")
-    
-    fastapi_app = create_fastapi_app(chat_manager)
-    
-    print(f"🌐 Iniciando FastAPI en puerto {Config.FASTAPI_PORT}...")
-    fastapi_thread = Thread(target=run_fastapi_server, args=(fastapi_app,), daemon=True)
-    fastapi_thread.start()
-    
-    print(f"🎨 Iniciando Gradio en puerto {Config.GRADIO_PORT}...")
-    gradio_app = create_gradio_app(chat_manager, profile)
-    
-    print("\n" + "=" * 60)
-    print("✅ SERVIDORES ACTIVOS")
-    print("=" * 60)
-    print(f"📊 Gradio UI:    http://127.0.0.1:{Config.GRADIO_PORT}")
-    print(f"🔌 FastAPI:      http://127.0.0.1:{Config.FASTAPI_PORT}")
-    print(f"📖 API Docs:     http://127.0.0.1:{Config.FASTAPI_PORT}/docs")
-    print("=" * 60)
-    print("\n💡 ENDPOINTS DISPONIBLES:")
-    print(f"   POST http://127.0.0.1:{Config.FASTAPI_PORT}/api/chat")
-    print(f"   GET  http://127.0.0.1:{Config.FASTAPI_PORT}/api/projects")
-    print(f"   GET  http://127.0.0.1:{Config.FASTAPI_PORT}/api/expertise")
-    print("=" * 60 + "\n")
-    
-    gradio_app.launch(
-        share=False,
-        server_name="127.0.0.1",
-        server_port=Config.GRADIO_PORT,
-        show_error=True
+    uvicorn.run(
+        app,
+        host=Config.HOST,
+        port=Config.PORT,
+        log_level="info"
     )
 
 
 if __name__ == "__main__":
     main()
-        

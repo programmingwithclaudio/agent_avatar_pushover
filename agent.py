@@ -6,35 +6,31 @@ import requests
 from pypdf import PdfReader
 import gradio as gr
 import pandas as pd
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+import uvicorn
+from threading import Thread
 
 load_dotenv(override=True)
 
-# ========================================
-# 📦 CONFIGURACIÓN CENTRALIZADA
-# ========================================
 class Config:
-    """Configuración centralizada de la aplicación"""
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     PUSHOVER_TOKEN = os.getenv("PUSHOVER_TOKEN")
     PUSHOVER_USER = os.getenv("PUSHOVER_USER")
     MODEL = "gpt-4o-mini"
     
-    # Rutas de archivos
     LINKEDIN_PDF = "me/linkedin.pdf"
     SUMMARY_TXT = "me/summary.txt"
     PROJECTS_CSV = "datasets/resumen/repos_con_tags_dinamicos.csv"
     METADATA_JSON = "datasets/resumen/metadata_dinamica.json"
-
-
-# ========================================
-# 🔔 SERVICIO DE NOTIFICACIONES
-# ========================================
-class NotificationService:
-    """Maneja envío de notificaciones por Pushover"""
     
+    GRADIO_PORT = 7860
+    FASTAPI_PORT = 8000
+
+
+class NotificationService:
     @staticmethod
     def send(message):
-        """Envía notificación push"""
         try:
             requests.post(
                 "https://api.pushover.net/1/messages.json",
@@ -48,19 +44,13 @@ class NotificationService:
             print(f"Error enviando notificación: {e}")
 
 
-# ========================================
-# 📂 CARGADOR DE DATOS DEL PERFIL
-# ========================================
 class ProfileLoader:
-    """Carga y gestiona datos del perfil profesional"""
-    
-    def __init__(self, name="Claudio Quispe Alarcon"):
+    def __init__(self, name="Claudio Quispe"):
         self.name = name
         self.linkedin = self._load_linkedin()
         self.summary = self._load_summary()
     
     def _load_linkedin(self):
-        """Extrae texto del PDF de LinkedIn"""
         try:
             reader = PdfReader(Config.LINKEDIN_PDF)
             text = ""
@@ -74,7 +64,6 @@ class ProfileLoader:
             return "Perfil de LinkedIn no disponible"
     
     def _load_summary(self):
-        """Lee el resumen profesional"""
         try:
             with open(Config.SUMMARY_TXT, "r", encoding="utf-8") as f:
                 return f.read()
@@ -83,18 +72,12 @@ class ProfileLoader:
             return "Resumen profesional no disponible"
 
 
-# ========================================
-# 🔍 REPOSITORIO DE PROYECTOS
-# ========================================
 class ProjectRepository:
-    """Maneja búsqueda y consulta de proyectos"""
-    
     def __init__(self):
         self.projects_df = self._load_projects()
         self.metadata = self._load_metadata()
     
     def _load_projects(self):
-        """Carga DataFrame de proyectos"""
         try:
             return pd.read_csv(Config.PROJECTS_CSV, sep=",")
         except FileNotFoundError:
@@ -102,7 +85,6 @@ class ProjectRepository:
             return pd.DataFrame()
     
     def _load_metadata(self):
-        """Carga metadata de proyectos"""
         try:
             with open(Config.METADATA_JSON, "r", encoding="utf-8") as f:
                 return json.load(f)
@@ -111,7 +93,6 @@ class ProjectRepository:
             return {}
     
     def search(self, dominio=None, tecnologia=None, tipo_proyecto=None, incluye_ml=False, limit=5):
-        """Busca proyectos según criterios"""
         if self.projects_df.empty:
             return {"error": "No hay proyectos disponibles"}
         
@@ -121,11 +102,9 @@ class ProjectRepository:
             try:
                 clasificacion = json.loads(row['clasificacion_dinamica'])
                 
-                # Aplicar filtros
                 if not self._match_filters(clasificacion, dominio, tecnologia, tipo_proyecto, incluye_ml):
                     continue
                 
-                # Construir información del proyecto
                 proyecto_info = {
                     'nombre': row.get('url_repositorio', '').split('/')[-1],
                     'url': row.get('url_repositorio', 'N/A'),
@@ -154,12 +133,9 @@ class ProjectRepository:
         }
     
     def _match_filters(self, clasificacion, dominio, tecnologia, tipo_proyecto, incluye_ml):
-        """Verifica si un proyecto cumple con los filtros"""
-        # Filtro de dominio
         if dominio and clasificacion.get('dominio_aplicacion', '').lower() != dominio.lower():
             return False
         
-        # Filtro de tecnología
         if tecnologia:
             todas_tech = (
                 clasificacion.get('tecnologias_backend', []) +
@@ -170,19 +146,16 @@ class ProjectRepository:
             if not any(tecnologia.lower() in tech.lower() for tech in todas_tech):
                 return False
         
-        # Filtro de tipo de proyecto
         if tipo_proyecto:
             if not any(tipo_proyecto.lower() in tipo.lower() for tipo in clasificacion.get('tipo_proyecto', [])):
                 return False
         
-        # Filtro ML/IA
         if incluye_ml and not clasificacion.get('ml_ia', []):
             return False
         
         return True
     
     def get_expertise(self, categoria="general"):
-        """Retorna expertise técnico según categoría"""
         if not self.metadata:
             return {"error": "Metadata no disponible"}
         
@@ -228,33 +201,23 @@ class ProjectRepository:
             return {"error": f"Categoría '{categoria}' no reconocida"}
 
 
-# ========================================
-# 🛠️ HERRAMIENTAS DISPONIBLES
-# ========================================
 def record_user_details(email, name="Nombre no indicado", notes="no proporcionadas"):
-    """Registra detalles de contacto del usuario"""
     NotificationService.send(f"📧 Contacto: {name} | Email: {email} | Notas: {notes}")
     return {"recorded": "ok"}
 
 def record_unknown_question(question):
-    """Registra pregunta que no se pudo responder"""
     NotificationService.send(f"❓ Pregunta sin respuesta: {question}")
     return {"recorded": "ok"}
 
 def search_projects(dominio=None, tecnologia=None, tipo_proyecto=None, incluye_ml=False, limit=5):
-    """Busca proyectos en el portfolio"""
     repo = ProjectRepository()
     return repo.search(dominio, tecnologia, tipo_proyecto, incluye_ml, limit)
 
 def get_technical_expertise(categoria="general"):
-    """Obtiene expertise técnico"""
     repo = ProjectRepository()
     return repo.get_expertise(categoria)
 
 
-# ========================================
-# 📋 DEFINICIONES JSON DE HERRAMIENTAS
-# ========================================
 TOOLS_SCHEMA = [
     {
         "type": "function",
@@ -290,7 +253,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "search_projects",
-            "description": "Busca proyectos específicos por dominio, tecnología o tipo. Úsala para '¿Qué proyectos has hecho con FastAPI?' o '¿Tienes experiencia en E-commerce?'",
+            "description": "Busca proyectos específicos por dominio, tecnología o tipo.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -308,7 +271,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "get_technical_expertise",
-            "description": "Muestra expertise técnico y estadísticas del portfolio. Úsala para '¿Cuál es tu stack?' o '¿Cuántos proyectos de ML has hecho?'",
+            "description": "Muestra expertise técnico y estadísticas del portfolio.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -325,18 +288,12 @@ TOOLS_SCHEMA = [
 ]
 
 
-# ========================================
-# 💬 GESTOR DE CHAT
-# ========================================
 class ChatManager:
-    """Maneja la lógica del chat con OpenAI"""
-    
     def __init__(self, profile: ProfileLoader):
         self.client = OpenAI(api_key=Config.OPENAI_API_KEY)
         self.profile = profile
     
     def build_system_prompt(self):
-        """Construye el prompt del sistema"""
         return f"""Actúas como {self.profile.name}. Respondes preguntas en su sitio web sobre su trayectoria profesional, habilidades y experiencia.
 
 Tu responsabilidad es representar a {self.profile.name} con fidelidad, usando un tono profesional y cercano.
@@ -359,14 +316,12 @@ Si el usuario muestra interés, pide su email y usa 'record_user_details'.
 Mantente siempre en el personaje de {self.profile.name}."""
     
     def chat(self, message, history):
-        """Procesa un mensaje del chat"""
         messages = [
             {"role": "system", "content": self.build_system_prompt()}
         ] + history + [
             {"role": "user", "content": message}
         ]
         
-        # Loop para manejar tool calls
         while True:
             response = self.client.chat.completions.create(
                 model=Config.MODEL,
@@ -377,16 +332,13 @@ Mantente siempre en el personaje de {self.profile.name}."""
             choice = response.choices[0]
             
             if choice.finish_reason == "tool_calls":
-                # Procesar llamadas a herramientas
                 messages.append(choice.message)
                 tool_results = self._execute_tools(choice.message.tool_calls)
                 messages.extend(tool_results)
             else:
-                # Respuesta final
                 return choice.message.content
     
     def _execute_tools(self, tool_calls):
-        """Ejecuta las herramientas solicitadas"""
         results = []
         for tool_call in tool_calls:
             tool_name = tool_call.function.name
@@ -394,7 +346,6 @@ Mantente siempre en el personaje de {self.profile.name}."""
             
             print(f"🔧 Ejecutando: {tool_name} con {arguments}", flush=True)
             
-            # Ejecutar la función correspondiente
             tool_function = globals().get(tool_name)
             if tool_function:
                 result = tool_function(**arguments)
@@ -410,42 +361,84 @@ Mantente siempre en el personaje de {self.profile.name}."""
         return results
 
 
-# ========================================
-# 🚀 APLICACIÓN PRINCIPAL
-# ========================================
-def main():
-    """Inicializa y lanza la aplicación"""
-    print("🔄 Cargando perfil profesional...")
-    profile = ProfileLoader()
+def create_fastapi_app(chat_manager: ChatManager):
+    app = FastAPI(title="Portfolio Chat API", version="1.0")
     
-    print("💬 Iniciando chat manager...")
-    chat_manager = ChatManager(profile)
+    @app.get("/")
+    async def root():
+        return {
+            "message": "Portfolio Chat API",
+            "endpoints": {
+                "chat": "/api/chat",
+                "projects": "/api/projects",
+                "expertise": "/api/expertise"
+            }
+        }
     
-    print("🎨 Lanzando interfaz Gradio...")
+    @app.post("/api/chat")
+    async def chat_endpoint(request: dict):
+        try:
+            message = request.get("message", "")
+            history = request.get("history", [])
+            
+            response = chat_manager.chat(message, history)
+            
+            return JSONResponse({
+                "response": response,
+                "status": "success"
+            })
+        except Exception as e:
+            return JSONResponse({
+                "error": str(e),
+                "status": "error"
+            }, status_code=500)
     
-    # ========================================
-    # 🎨 CSS OPTIMIZADO Y CORREGIDO
-    # ========================================
+    @app.get("/api/projects")
+    async def projects_endpoint(
+        dominio: str = None,
+        tecnologia: str = None,
+        tipo_proyecto: str = None,
+        incluye_ml: bool = False,
+        limit: int = 5
+    ):
+        try:
+            result = search_projects(dominio, tecnologia, tipo_proyecto, incluye_ml, limit)
+            return JSONResponse(result)
+        except Exception as e:
+            return JSONResponse({
+                "error": str(e),
+                "status": "error"
+            }, status_code=500)
+    
+    @app.get("/api/expertise")
+    async def expertise_endpoint(categoria: str = "general"):
+        try:
+            result = get_technical_expertise(categoria)
+            return JSONResponse(result)
+        except Exception as e:
+            return JSONResponse({
+                "error": str(e),
+                "status": "error"
+            }, status_code=500)
+    
+    return app
+
+
+def create_gradio_app(chat_manager: ChatManager, profile: ProfileLoader):
+    
     custom_css = """
-    /* ==========================================
-       CONFIGURACIÓN BASE - Tema Oscuro
-       ========================================== */
     .gradio-container {
         background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%) !important;
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
         min-height: 100vh;
     }
     
-    /* Contenedor principal - permite scroll natural */
     .contain {
         max-width: 1600px;
         margin: 0 auto;
         padding: 20px;
     }
     
-    /* ==========================================
-       ÁREA DE CHAT - Scroll funcional y compacto
-       ========================================== */
     #chat-container {
         height: 550px !important;
         max-height: 65vh !important;
@@ -455,11 +448,10 @@ def main():
         border-radius: 16px !important;
         border: 1px solid rgba(102, 126, 234, 0.2) !important;
         padding: 16px !important;
-        margin: 0 !important; /* Eliminamos el margin-bottom */
+        margin: 0 !important;
         box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3) !important;
     }
     
-    /* Mensajes del chat */
     #chat-container .message-wrap {
         background: rgba(255, 255, 255, 0.05) !important;
         border: 1px solid rgba(255, 255, 255, 0.08) !important;
@@ -470,48 +462,97 @@ def main():
         max-width: 85% !important;
     }
     
-    /* Mensajes del usuario */
-    #chat-container .user {
+    #chat-container .user,
+    #chat-container .message.user {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
-        color: white !important;
+        color: #ffffff !important;
         margin-left: auto !important;
+        margin-right: 0 !important;
         border: none !important;
     }
     
-    /* Mensajes del bot */
-    #chat-container .bot {
-        background: rgba(255, 255, 255, 0.08) !important;
-        border-left: 3px solid #667eea !important;
-        color: #e8e8e8 !important;
-        margin-right: auto !important;
+    #chat-container .user p,
+    #chat-container .user span,
+    #chat-container .user div,
+    #chat-container .message.user p,
+    #chat-container .message.user span,
+    #chat-container .message.user div {
+        color: #ffffff !important;
     }
     
-    /* ==========================================
-       SIDEBAR - Scroll independiente FORZADO
-       ========================================== */
+    #chat-container .bot,
+    #chat-container .message.bot {
+        background: rgba(255, 255, 255, 0.12) !important;
+        border-left: 3px solid #667eea !important;
+        color: #ffffff !important;
+        margin-right: auto !important;
+        margin-left: 0 !important;
+    }
+    
+    #chat-container .bot p,
+    #chat-container .bot span,
+    #chat-container .bot div,
+    #chat-container .message.bot p,
+    #chat-container .message.bot span,
+    #chat-container .message.bot div {
+        color: #ffffff !important;
+    }
+    
     .sidebar-questions {
         background: rgba(255, 255, 255, 0.03) !important;
         border-radius: 16px !important;
-        padding: 20px !important;
+        padding: 0 !important;
         border: 1px solid rgba(102, 126, 234, 0.2) !important;
         height: 600px !important;
         max-height: 70vh !important;
-        overflow-y: scroll !important; /* Cambiado de auto a scroll */
+        overflow-y: auto !important;
         overflow-x: hidden !important;
         box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3) !important;
         display: block !important;
     }
-    
-    /* Forzar scroll en el contenedor interno */
-    .sidebar-questions > div {
-        height: 100% !important;
-        overflow-y: auto !important;
+    .category-title {
+        color: #667eea !important;
+        font-size: 12px !important;
+        font-weight: 700 !important;
+        margin: 16px 0 8px 0 !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.8px !important;
+        border-bottom: 1px solid rgba(102, 126, 234, 0.3) !important;
+        padding-bottom: 4px !important;
+        line-height: 1 !important;
+    }
+    .sidebar-questions .category-title,
+    .sidebar-questions .category-title * {
+        color: #667eea !important;
     }
     
-    /* ==========================================
-       SCROLLBARS PERSONALIZADOS
-       ========================================== */
-    /* Para Webkit (Chrome, Safari, Edge) */
+    .category-section {
+        margin-bottom: 16px !important;
+        padding: 0 12px !important;
+    }
+
+    .questions-container {
+        display: flex !important;
+        flex-direction: column !important;
+        gap: 6px !important;
+        margin-bottom: 8px !important;
+    } 
+    
+    .sidebar-questions .markdown,
+    .sidebar-questions .prose {
+        margin: 4px 0 !important;
+        padding: 0 !important;
+        /* Añadir para evitar que herede colores incorrectos */
+        color: inherit !important;
+    }
+    .category-title .markdown,
+    .category-title .prose {
+        color: #667eea !important;
+    }
+    .sidebar-questions .markdown p,
+    .sidebar-questions .prose p {
+        color: inherit !important;
+    }
     #chat-container::-webkit-scrollbar,
     .sidebar-questions::-webkit-scrollbar {
         width: 10px;
@@ -521,7 +562,7 @@ def main():
     .sidebar-questions::-webkit-scrollbar-track {
         background: rgba(255, 255, 255, 0.05);
         border-radius: 10px;
-        margin: 4px;
+        margin: 8px;
     }
     
     #chat-container::-webkit-scrollbar-thumb,
@@ -536,113 +577,117 @@ def main():
         background: linear-gradient(180deg, #7c8ef0 0%, #8a5bb0 100%);
     }
     
-    /* Para Firefox */
     #chat-container,
     .sidebar-questions {
         scrollbar-width: thin;
         scrollbar-color: #667eea rgba(255, 255, 255, 0.05);
     }
     
-    /* ==========================================
-       BOTONES DE PREGUNTAS SUGERIDAS
-       ========================================== */
     .question-btn {
         background: linear-gradient(135deg, rgba(102, 126, 234, 0.15) 0%, rgba(118, 75, 162, 0.15) 100%) !important;
         border: 1px solid rgba(102, 126, 234, 0.3) !important;
-        color: #e0e0e0 !important;
-        border-radius: 10px !important;
-        padding: 12px 16px !important;
-        margin: 8px 0 !important;
+        color: #ffffff !important;
+        border-radius: 8px !important;
+        padding: 10px 14px !important;
+        margin: 0 !important; /* Eliminamos márgenes verticales */
         transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
-        font-size: 13px !important;
+        font-size: 12px !important;
         text-align: left !important;
         width: 100% !important;
         white-space: normal !important;
         word-wrap: break-word !important;
-        line-height: 1.5 !important;
+        line-height: 1.4 !important;
         cursor: pointer !important;
+        flex-shrink: 0 !important;
     }
     
     .question-btn:hover {
         background: linear-gradient(135deg, rgba(102, 126, 234, 0.3) 0%, rgba(118, 75, 162, 0.3) 100%) !important;
         border-color: rgba(102, 126, 234, 0.6) !important;
-        transform: translateX(6px) scale(1.02) !important;
+        transform: translateX(4px) scale(1.02) !important;
         box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3) !important;
+        color: #ffffff !important;
     }
     
     .question-btn:active {
         transform: translateX(6px) scale(0.98) !important;
     }
     
-    /* ==========================================
-       TIPOGRAFÍA Y TÍTULOS
-       ========================================== */
     h1, h2, h3, h4 {
         color: #e8e8e8 !important;
         font-weight: 600 !important;
-        margin: 0 0 12px 0 !important;
+        margin: 0 0 6px 0 !important;
     }
     
     .header-section {
-        padding: 24px 20px !important;
-        margin-bottom: 20px !important;
+        padding: 18px !important;
+        margin-bottom: 14px !important;
         background: rgba(255, 255, 255, 0.02) !important;
         border-radius: 16px !important;
         border: 1px solid rgba(102, 126, 234, 0.2) !important;
     }
     
     .header-section h1 {
-        font-size: 28px !important;
+        font-size: 26px !important;
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         background-clip: text;
-        margin-bottom: 8px !important;
+        margin-bottom: 4px !important;
     }
     
     .header-section h3 {
-        font-size: 16px !important;
-        color: #b0b0b0 !important;
+        font-size: 15px !important;
+        color: #158f56 !important;
         font-weight: 400 !important;
     }
     
     .section-title {
         color: #667eea !important;
-        font-size: 13px !important;
+        font-size: 10px !important;
         font-weight: 700 !important;
-        margin: 20px 0 12px 0 !important;
+        margin: 12px 0 6px 0 !important;
         text-transform: uppercase !important;
-        letter-spacing: 1.5px !important;
-        border-bottom: 2px solid rgba(102, 126, 234, 0.3) !important;
-        padding-bottom: 8px !important;
+        letter-spacing: 0.8px !important;
+        border-bottom: 1px solid rgba(102, 126, 234, 0.3) !important;
+        padding-bottom: 2px !important;
+        line-height: 1 !important;
+    }
+    
+    .section-title:first-of-type {
+        margin-top: 0 !important;
     }
     
     .sidebar-title {
         color: #e8e8e8 !important;
-        font-size: 20px !important;
-        margin-bottom: 12px !important;
+        font-size: 17px !important;
+        margin: 12px 0 6px 0 !important;
         text-align: center !important;
     }
     
-    /* ==========================================
-       ÁREA DE INPUT - Alineada y compacta
-       ========================================== */
+    .sidebar-subtitle {
+        font-size: 10px !important;
+        color: #888 !important;
+        text-align: center !important;
+        margin: 0 0 12px 0 !important;
+        font-style: italic !important;
+    }
+    
     .input-container {
-        padding: 0 !important; /* Eliminamos padding interno */
-        background: transparent !important; /* Sin fondo duplicado */
+        padding: 0 !important;
+        background: #1f2937;
         border-radius: 0 !important;
         margin-top: 12px !important;
-        border: none !important; /* Sin borde duplicado */
+        border: none !important;
         display: flex !important;
         gap: 8px !important;
         align-items: stretch !important;
     }
     
-    /* Textbox optimizado */
     .input-container textarea {
-        background: rgba(255, 255, 255, 0.05) !important;
-        border: 1px solid rgba(102, 126, 234, 0.3) !important;
-        color: #e8e8e8 !important;
+        background: rgba(255, 255, 255, 0.08) !important;
+        border: 1px solid rgba(102, 126, 234, 0.4) !important;
+        color: #ffffff !important;
         border-radius: 12px !important;
         padding: 14px 16px !important;
         font-size: 14px !important;
@@ -651,13 +696,17 @@ def main():
         max-height: 100px !important;
     }
     
+    .input-container textarea::placeholder {
+        color: rgba(255, 255, 255, 0.5) !important;
+    }
+    
     .input-container textarea:focus {
         border-color: #667eea !important;
         box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2) !important;
         outline: none !important;
+        background: rgba(255, 255, 255, 0.12) !important;
     }
     
-    /* Botón de envío - mismo alto que el textarea */
     .input-container button {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
         border: none !important;
@@ -681,38 +730,6 @@ def main():
         transform: scale(0.98) !important;
     }
     
-    /* ==========================================
-       RESPONSIVE DESIGN
-       ========================================== */
-    
-    /* Tablets (768px - 1024px) */
-    @media (max-width: 1024px) {
-        #chat-container {
-            height: 450px !important;
-            max-height: 60vh !important;
-        }
-        
-        .sidebar-questions {
-            height: 500px !important;
-            max-height: 60vh !important;
-        }
-        
-        .question-btn {
-            font-size: 12px !important;
-            padding: 10px 14px !important;
-        }
-        
-        .header-section h1 {
-            font-size: 24px !important;
-        }
-        
-        .input-container textarea {
-            font-size: 13px !important;
-            padding: 12px 14px !important;
-        }
-    }
-    
-    /* Móviles (hasta 768px) */
     @media (max-width: 768px) {
         .contain {
             padding: 12px;
@@ -721,108 +738,44 @@ def main():
         #chat-container {
             height: 350px !important;
             max-height: 50vh !important;
-            margin-bottom: 16px !important;
         }
         
         .sidebar-questions {
             height: 300px !important;
             max-height: 45vh !important;
-            margin-top: 16px !important;
         }
         
-        .header-section {
-            padding: 16px !important;
-        }
-        
-        .header-section h1 {
-            font-size: 20px !important;
-        }
-        
-        .header-section h3 {
-            font-size: 13px !important;
+        .sidebar-questions > * {
+            padding: 0 10px !important;
         }
         
         .question-btn {
             font-size: 11px !important;
-            padding: 10px 12px !important;
+            padding: 7px 10px !important;
         }
         
         .section-title {
-            font-size: 11px !important;
-            margin: 16px 0 10px 0 !important;
-        }
-        
-        .sidebar-title {
-            font-size: 16px !important;
-        }
-        
-        .input-container textarea {
-            font-size: 13px !important;
-            padding: 10px 12px !important;
-            min-height: 45px !important;
-        }
-        
-        .input-container button {
-            min-width: 50px !important;
-            font-size: 18px !important;
+            font-size: 9px !important;
+            margin: 10px 0 4px 0 !important;
         }
     }
     
-    /* Móviles pequeños (hasta 480px) */
-    @media (max-width: 480px) {
-        #chat-container {
-            height: 300px !important;
-            max-height: 45vh !important;
-            padding: 12px !important;
-        }
-        
-        .sidebar-questions {
-            height: 250px !important;
-            max-height: 40vh !important;
-            padding: 16px !important;
-        }
-        
-        .header-section h1 {
-            font-size: 18px !important;
-        }
-        
-        .header-section h3 {
-            font-size: 12px !important;
-        }
-        
-        #chat-container .message-wrap {
-            padding: 10px 14px !important;
-            max-width: 90% !important;
-        }
-        
-        .input-container textarea {
-            font-size: 12px !important;
-            padding: 10px !important;
-            min-height: 42px !important;
-        }
-        
-        .input-container button {
-            min-width: 45px !important;
-            font-size: 16px !important;
-            padding: 0 16px !important;
-        }
-    }
-    
-    /* ==========================================
-       MEJORAS DE ACCESIBILIDAD
-       ========================================== */
     * {
         -webkit-font-smoothing: antialiased;
         -moz-osx-font-smoothing: grayscale;
     }
     
-    /* Mejorar contraste de texto */
-    .bot p, .user p {
+    .bot p, .user p,
+    .message.bot p, .message.user p {
         line-height: 1.6 !important;
         margin: 0 !important;
+        color: inherit !important;
     }
     
-    /* Focus visible para accesibilidad */
+    #chat-container * {
+        color: inherit !important;
+    }
+    
     button:focus-visible,
     textarea:focus-visible {
         outline: 3px solid #667eea !important;
@@ -830,37 +783,36 @@ def main():
     }
     """
     
-    # Preguntas sugeridas organizadas por categorías
     preguntas_clave = {
         "🎯 Perfil General": [
             "¿Cuál es tu experiencia profesional?",
             "¿Cuál es tu stack tecnológico principal?",
             "¿Cuántos proyectos has desarrollado?"
         ],
-        "💻 Experiencia Backend": [
+        "💻 Backend": [
             "¿Qué proyectos has hecho con Python?",
             "¿Tienes experiencia con FastAPI o Django?",
             "¿Has trabajado con bases de datos?",
             "Muéstrame tu experiencia en APIs"
         ],
-        "🎨 Experiencia Frontend": [
+        "🎨 Frontend": [
             "¿Qué frameworks de frontend dominas?",
             "¿Has trabajado con React o Vue?",
             "Muéstrame proyectos de UI"
         ],
-        "🤖 Machine Learning & IA": [
+        "🤖 ML & IA": [
             "¿Tienes experiencia en ML?",
             "¿Qué proyectos de IA has desarrollado?",
             "¿Has trabajado con TensorFlow?",
             "Muéstrame modelos de ML"
         ],
-        "🏗️ Arquitectura & DevOps": [
+        "🏗️ Arquitectura": [
             "¿Experiencia con Docker y Kubernetes?",
             "¿Has trabajado con microservicios?",
             "¿Qué experiencia tienes en DevOps?",
             "Proyectos con arquitectura escalable"
         ],
-        "🚀 Proyectos Destacados": [
+        "🚀 Destacados": [
             "¿Cuáles son tus proyectos más complejos?",
             "¿Has desarrollado apps Full Stack?",
             "¿Proyectos de E-commerce?",
@@ -869,19 +821,16 @@ def main():
     }
     
     with gr.Blocks(css=custom_css, theme=gr.themes.Soft()) as demo:
-        # Header
         with gr.Column(elem_classes="header-section"):
             gr.Markdown(
                 f"""
                 # 💬 Chat con {profile.name}
-                ### Ingeniero de Software | Full Stack Developer | ML Engineer
+                ### Desarrollador Web & Data/AI Solutions | Python · SQL/NoSQL
                 """,
                 elem_classes="header"
             )
         
-        # Contenedor principal con dos columnas
         with gr.Row(equal_height=True):
-            # Columna del chat (65%)
             with gr.Column(scale=65):
                 chatbot = gr.Chatbot(
                     elem_id="chat-container",
@@ -904,21 +853,18 @@ def main():
                     with gr.Column(scale=1, min_width=60):
                         submit = gr.Button("📤", variant="primary", size="lg")
             
-            # Sidebar con preguntas sugeridas (35%)
             with gr.Column(scale=35, elem_classes="sidebar-questions"):
                 gr.Markdown("### 📋 Preguntas Sugeridas", elem_classes="sidebar-title")
                 gr.Markdown("*💡 Haz clic en cualquier pregunta*", elem_classes="sidebar-subtitle")
                 
-                # Crear botones por categoría
                 for categoria, preguntas in preguntas_clave.items():
-                    gr.Markdown(f"**{categoria}**", elem_classes="section-title")
+                    gr.Markdown(f"**{categoria}**", elem_classes="category-title")
                     for pregunta in preguntas:
                         btn = gr.Button(
                             f"→ {pregunta}",
                             elem_classes="question-btn",
                             size="sm"
                         )
-                        # Cuando se hace clic, coloca la pregunta en el textbox
                         btn.click(
                             lambda p=pregunta: p,
                             None,
@@ -926,37 +872,74 @@ def main():
                             queue=False
                         )
         
-        # ========================================
-        # LÓGICA DEL CHAT
-        # ========================================
         def respond(message, chat_history):
-            """Procesa mensaje y genera respuesta"""
             if not message.strip():
                 return "", chat_history
             
-            # Agregar mensaje del usuario
             chat_history.append({"role": "user", "content": message})
-            
-            # Obtener respuesta del bot
             bot_message = chat_manager.chat(message, chat_history[:-1])
-            
-            # Agregar respuesta del bot
             chat_history.append({"role": "assistant", "content": bot_message})
             
             return "", chat_history
         
-        # Eventos
         msg.submit(respond, [msg, chatbot], [msg, chatbot])
         submit.click(respond, [msg, chatbot], [msg, chatbot])
     
-    # Lanzar aplicación
-    demo.launch(
+    return demo
+
+
+def run_fastapi_server(app):
+    uvicorn.run(
+        app,
+        host="127.0.0.1",
+        port=Config.FASTAPI_PORT,
+        log_level="info"
+    )
+
+
+def main():
+    print("=" * 60)
+    print("🚀 INICIANDO PORTFOLIO CHAT - DUAL MODE")
+    print("=" * 60)
+    
+    print("\n🔄 Cargando perfil profesional...")
+    profile = ProfileLoader()
+    
+    print("💬 Iniciando chat manager...")
+    chat_manager = ChatManager(profile)
+    
+    print("\n📡 Configurando servidores...")
+    
+    fastapi_app = create_fastapi_app(chat_manager)
+    
+    print(f"🌐 Iniciando FastAPI en puerto {Config.FASTAPI_PORT}...")
+    fastapi_thread = Thread(target=run_fastapi_server, args=(fastapi_app,), daemon=True)
+    fastapi_thread.start()
+    
+    print(f"🎨 Iniciando Gradio en puerto {Config.GRADIO_PORT}...")
+    gradio_app = create_gradio_app(chat_manager, profile)
+    
+    print("\n" + "=" * 60)
+    print("✅ SERVIDORES ACTIVOS")
+    print("=" * 60)
+    print(f"📊 Gradio UI:    http://127.0.0.1:{Config.GRADIO_PORT}")
+    print(f"🔌 FastAPI:      http://127.0.0.1:{Config.FASTAPI_PORT}")
+    print(f"📖 API Docs:     http://127.0.0.1:{Config.FASTAPI_PORT}/docs")
+    print("=" * 60)
+    print("\n💡 ENDPOINTS DISPONIBLES:")
+    print(f"   POST http://127.0.0.1:{Config.FASTAPI_PORT}/api/chat")
+    print(f"   GET  http://127.0.0.1:{Config.FASTAPI_PORT}/api/projects")
+    print(f"   GET  http://127.0.0.1:{Config.FASTAPI_PORT}/api/expertise")
+    print("=" * 60 + "\n")
+    
+    gradio_app.launch(
         share=False,
         server_name="127.0.0.1",
-        server_port=7860,
+        server_port=Config.GRADIO_PORT,
         show_error=True
     )
 
 
 if __name__ == "__main__":
     main()
+        

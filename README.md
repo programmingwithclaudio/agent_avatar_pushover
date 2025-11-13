@@ -25,7 +25,7 @@ pip install -r requirements.txt
 
 
 # organizar scripts a csv
-python app.py
+python agent.py
 
 ```
 > **Ruta: [http://localhost:7865](http://localhost:7865)**
