@@ -2,13 +2,13 @@
 
 - Objetivo: Asistir en información y presentación profesional, finalmente no olvide enviar sus datos de contacto.
 - Usos en frameworks de python
-- (Directo) Ingresar el Link Https `http://localhost:8000/docs`.
+- (Directo) Ingresar el Link Https `https://agentavatarpushover-production-62d1.up.railway.app/chat/`.
 - (Opcional) Configurar entorno `venv/`, api llm's en `.env` y Ejecutar directamente este comando `python -m ia.agent` en el directorio principal.
 
 ---
 Deploy en Https:
-
-> **Ruta: [http://localhost:8000/docs](http://localhost:8000/docs)**
+> **Agente IA Avatar: [https://agentavatarpushover-production-62d1.up.railway.app/chat/](https://agentavatarpushover-production-62d1.up.railway.app/chat/)**
+> **Ruta Enpoints: [https://agentavatarpushover-production-62d1.up.railway.app/docs](https://agentavatarpushover-production-62d1.up.railway.app/docs)**
 
 ### **1 Deploy Agente local**
 
